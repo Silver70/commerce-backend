@@ -1,0 +1,630 @@
+<script setup lang="ts">
+import { z } from "zod";
+
+// Form validation schemas
+const optionSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1, "Option name is required"),
+  code: z.string().min(1, "Option code is required"),
+});
+
+const optionGroupSchema = z.object({
+  id: z.string(),
+  name: z.string().min(1, "Option group name is required"),
+  code: z.string().min(1, "Option group code is required"),
+  options: z.array(optionSchema).min(1, "At least one option is required"),
+});
+
+const variantSchema = z.object({
+  id: z.string().optional(),
+  name: z.string().min(1, "Variant name is required"),
+  sku: z.string().min(1, "SKU is required"),
+  price: z.number().min(0, "Price must be positive"),
+  stockOnHand: z.number().min(0, "Stock must be positive"),
+  enabled: z.boolean(),
+  options: z.array(
+    z.object({
+      optionGroupId: z.string(),
+      optionId: z.string(),
+    })
+  ),
+});
+
+const schema = z.object({
+  name: z.string().min(1, "Product name is required").max(255, "Name too long"),
+  slug: z
+    .string()
+    .min(1, "Slug is required")
+    .regex(
+      /^[a-z0-9-]+$/,
+      "Slug must contain only lowercase letters, numbers, and hyphens"
+    ),
+  description: z.string().optional(),
+  enabled: z.boolean(),
+  optionGroups: z.array(optionGroupSchema),
+  variants: z.array(variantSchema),
+});
+
+type FormData = z.infer<typeof schema>;
+type OptionGroup = z.infer<typeof optionGroupSchema>;
+type Option = z.infer<typeof optionSchema>;
+type Variant = z.infer<typeof variantSchema>;
+
+// Form state
+const loading = ref(false);
+const form = ref<FormData>({
+  name: "",
+  slug: "",
+  description: "",
+  enabled: true,
+  optionGroups: [],
+  variants: [],
+});
+
+// Generate unique IDs
+function generateId() {
+  return Math.random().toString(36).substring(2, 11);
+}
+
+// Simple slug generation
+function generateSlug() {
+  if (form.value.name) {
+    form.value.slug = form.value.name
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, "")
+      .replace(/\s+/g, "-")
+      .trim();
+  }
+}
+
+// Auto-generate slug only when name field loses focus and slug is empty
+function handleNameBlur() {
+  if (form.value.name && !form.value.slug) {
+    generateSlug();
+  }
+}
+
+// Option group management
+function addOptionGroup() {
+  const newGroup: OptionGroup = {
+    id: generateId(),
+    name: "",
+    code: "",
+    options: [],
+  };
+  form.value.optionGroups.push(newGroup);
+}
+
+function removeOptionGroup(groupIndex: number) {
+  form.value.optionGroups.splice(groupIndex, 1);
+}
+
+// Option input values for tag-based input
+const optionInputValues = ref<Record<number, string>>({});
+
+// Get option input value for a specific group
+function getOptionInputValue(groupIndex: number): string {
+  return optionInputValues.value[groupIndex] || "";
+}
+
+// Set option input value for a specific group
+function setOptionInputValue(groupIndex: number, value: string) {
+  optionInputValues.value[groupIndex] = value;
+}
+
+// Handle keydown events for tag input
+function handleOptionKeydown(event: KeyboardEvent, groupIndex: number) {
+  const input = event.target as HTMLInputElement;
+  const value = input.value.trim();
+
+  // Handle Enter, comma, or space
+  if (
+    (event.key === "Enter" || event.key === "," || event.key === " ") &&
+    value
+  ) {
+    event.preventDefault();
+    addOptionFromInput(groupIndex, value);
+    setOptionInputValue(groupIndex, "");
+  }
+
+  // Handle backspace when input is empty to remove last tag
+  if (event.key === "Backspace" && !value) {
+    const group = form.value.optionGroups[groupIndex];
+    if (group && group.options.length > 0) {
+      removeOption(groupIndex, group.options.length - 1);
+    }
+  }
+}
+
+// Add option from tag input
+function addOptionFromInput(groupIndex: number, optionName: string) {
+  const group = form.value.optionGroups[groupIndex];
+  if (!group) return;
+
+  // Check if option already exists
+  const exists = group.options.some(
+    (option) => option.name.toLowerCase() === optionName.toLowerCase()
+  );
+
+  if (exists) return;
+
+  const newOption: Option = {
+    id: generateId(),
+    name: optionName,
+    code: optionName.toLowerCase().replace(/[^a-z0-9]/g, ""),
+  };
+
+  group.options.push(newOption);
+}
+
+function removeOption(groupIndex: number, optionIndex: number) {
+  const group = form.value.optionGroups[groupIndex];
+  if (!group) return;
+
+  group.options.splice(optionIndex, 1);
+}
+
+// Auto-generate codes when field loses focus and code is empty
+function handleOptionGroupNameBlur(groupIndex: number) {
+  const group = form.value.optionGroups[groupIndex];
+  if (!group) return;
+
+  if (group.name && !group.code) {
+    group.code = group.name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+}
+
+// Generate all possible variant combinations
+function generateVariants() {
+  if (form.value.optionGroups.length === 0) {
+    // No option groups, create a single default variant
+    form.value.variants = [
+      {
+        name: form.value.name || "Default",
+        sku: form.value.slug || "default",
+        price: 0,
+        stockOnHand: 0,
+        enabled: true,
+        options: [],
+      },
+    ];
+    return;
+  }
+
+  // Filter out option groups that have no valid options
+  const validGroups = form.value.optionGroups.filter((group) =>
+    group.options.some((option) => option.name && option.code)
+  );
+
+  if (validGroups.length === 0) {
+    form.value.variants = [];
+    return;
+  }
+
+  // Generate all combinations
+  const combinations = generateCombinations(validGroups);
+
+  form.value.variants = combinations.map((combination) => ({
+    name: generateVariantName(combination),
+    sku: generateVariantSku(combination),
+    price: 0,
+    stockOnHand: 0,
+    enabled: true,
+    options: combination,
+  }));
+}
+
+function generateCombinations(
+  groups: OptionGroup[]
+): Array<Array<{ optionGroupId: string; optionId: string }>> {
+  if (groups.length === 0) return [];
+
+  const firstGroup = groups[0];
+  if (!firstGroup) return [];
+
+  if (groups.length === 1) {
+    return firstGroup.options
+      .filter((option) => option.name && option.code)
+      .map((option) => [{ optionGroupId: firstGroup.id, optionId: option.id }]);
+  }
+
+  const restGroups = groups.slice(1);
+  const firstOptions = firstGroup.options.filter(
+    (option) => option.name && option.code
+  );
+  const restCombinations = generateCombinations(restGroups);
+
+  const result = [];
+  for (const option of firstOptions) {
+    for (const restCombination of restCombinations) {
+      result.push([
+        { optionGroupId: firstGroup.id, optionId: option.id },
+        ...restCombination,
+      ]);
+    }
+  }
+  return result;
+}
+
+function generateVariantName(
+  options: Array<{ optionGroupId: string; optionId: string }>
+): string {
+  const optionNames = options
+    .map((opt) => {
+      const group = form.value.optionGroups.find(
+        (g) => g.id === opt.optionGroupId
+      );
+      const option = group?.options.find((o) => o.id === opt.optionId);
+      return option?.name || "";
+    })
+    .filter(Boolean);
+
+  return optionNames.length > 0
+    ? `${form.value.name} - ${optionNames.join(" / ")}`
+    : form.value.name || "Variant";
+}
+
+function generateVariantSku(
+  options: Array<{ optionGroupId: string; optionId: string }>
+): string {
+  const optionCodes = options
+    .map((opt) => {
+      const group = form.value.optionGroups.find(
+        (g) => g.id === opt.optionGroupId
+      );
+      const option = group?.options.find((o) => o.id === opt.optionId);
+      return option?.code || "";
+    })
+    .filter(Boolean);
+
+  const baseSlug = form.value.slug || "product";
+  return optionCodes.length > 0
+    ? `${baseSlug}-${optionCodes.join("-")}`
+    : baseSlug;
+}
+
+// Form submission
+async function onSubmit() {
+  console.log("Form submitted", form.value);
+}
+
+// Cancel
+function onCancel() {
+  navigateTo("/products");
+}
+</script>
+
+<template>
+  <UDashboardPanel>
+    <template #header>
+      <UDashboardNavbar title="Create Product">
+        <template #leading>
+          <UDashboardSidebarCollapse />
+        </template>
+        <template #right>
+          <div class="flex items-center gap-2">
+            <UButton
+              variant="outline"
+              color="neutral"
+              :disabled="loading"
+              @click="onCancel"
+            >
+              Cancel
+            </UButton>
+            <UButton
+              type="submit"
+              form="product-form"
+              :loading="loading"
+              color="primary"
+            >
+              Create Product
+            </UButton>
+          </div>
+        </template>
+      </UDashboardNavbar>
+    </template>
+
+    <template #body>
+      <div class="p-6">
+        <UForm
+          id="product-form"
+          :schema="schema"
+          :state="form"
+          class="max-w-2xl"
+          @submit="onSubmit"
+        >
+          <div class="space-y-6">
+            <!-- Basic Information -->
+            <UCard>
+              <template #header>
+                <h2 class="text-lg font-semibold">Basic Information</h2>
+              </template>
+
+              <div class="space-y-4">
+                <UFormGroup label="Product Name" name="name" required>
+                  <UInput
+                    v-model="form.name"
+                    placeholder="Enter product name"
+                    :disabled="loading"
+                    @blur="handleNameBlur"
+                  />
+                </UFormGroup>
+
+                <UFormGroup label="Slug" name="slug" required>
+                  <div class="flex gap-2">
+                    <UInput
+                      v-model="form.slug"
+                      placeholder="product-slug"
+                      :disabled="loading"
+                      class="flex-1"
+                    />
+                    <UButton
+                      size="sm"
+                      variant="outline"
+                      :disabled="loading || !form.name"
+                      @click="generateSlug"
+                    >
+                      Generate
+                    </UButton>
+                  </div>
+                </UFormGroup>
+
+                <UFormGroup label="Description" name="description">
+                  <UTextarea
+                    v-model="form.description"
+                    placeholder="Product description..."
+                    :rows="3"
+                    :disabled="loading"
+                  />
+                </UFormGroup>
+
+                <UFormGroup label="Status" name="enabled">
+                  <UCheckbox v-model="form.enabled" :disabled="loading" />
+                  <span class="ml-2 text-sm">
+                    {{ form.enabled ? "Active" : "Inactive" }}
+                  </span>
+                </UFormGroup>
+              </div>
+            </UCard>
+
+            <!-- Option Groups -->
+            <UCard>
+              <template #header>
+                <div class="flex items-center justify-between">
+                  <h2 class="text-lg font-semibold">Product Options</h2>
+                  <UButton
+                    size="sm"
+                    variant="outline"
+                    icon="i-heroicons-plus"
+                    :disabled="loading"
+                    @click="addOptionGroup"
+                  >
+                    Add Option Group
+                  </UButton>
+                </div>
+              </template>
+
+              <div
+                v-if="form.optionGroups.length === 0"
+                class="text-center py-8"
+              >
+                <div class="text-gray-400 mb-4">
+                  <i class="i-heroicons-squares-2x2 text-4xl" />
+                </div>
+                <h3
+                  class="text-lg font-medium text-gray-900 dark:text-white mb-2"
+                >
+                  No Option Groups
+                </h3>
+                <p class="text-gray-500 mb-4">
+                  Add option groups like Size, Color, or Material to create
+                  product variants
+                </p>
+                <UButton
+                  variant="outline"
+                  icon="i-heroicons-plus"
+                  :disabled="loading"
+                  @click="addOptionGroup"
+                >
+                  Add First Option Group
+                </UButton>
+              </div>
+
+              <div v-else class="space-y-6">
+                <div
+                  v-for="(group, groupIndex) in form.optionGroups"
+                  :key="group.id"
+                  class="border border-gray-200 dark:border-gray-700 rounded-lg p-4"
+                >
+                  <div class="flex items-center justify-between mb-4">
+                    <h3 class="font-medium text-gray-900 dark:text-white">
+                      Option Group {{ groupIndex + 1 }}
+                    </h3>
+                    <UButton
+                      size="sm"
+                      color="error"
+                      variant="ghost"
+                      icon="i-heroicons-trash"
+                      :disabled="loading"
+                      @click="removeOptionGroup(groupIndex)"
+                    />
+                  </div>
+
+                  <div class="space-y-4 flex gap-4">
+                    <UFormGroup
+                      label="Group Name"
+                      :name="`optionGroups.${groupIndex}.name`"
+                      required
+                    >
+                      <UInput
+                        v-model="group.name"
+                        placeholder="e.g., Size, Color"
+                        :disabled="loading"
+                        @blur="handleOptionGroupNameBlur(groupIndex)"
+                      />
+                    </UFormGroup>
+
+                    <UFormGroup
+                      label="Values"
+                      :name="`optionGroups.${groupIndex}.options`"
+                    >
+                      <div class="space-y-3">
+                        <UInput
+                          :model-value="getOptionInputValue(groupIndex)"
+                          placeholder="Type option values and press Enter"
+                          :disabled="loading"
+                          @keydown="handleOptionKeydown($event, groupIndex)"
+                          @update:model-value="
+                            setOptionInputValue(groupIndex, $event)
+                          "
+                        />
+
+                        <!-- Option tags display -->
+                        <div
+                          v-if="group.options && group.options.length > 0"
+                          class="flex flex-wrap gap-2"
+                        >
+                          <div
+                            v-for="(option, optionIndex) in group.options"
+                            :key="option.id"
+                            class="inline-flex items-center gap-1 px-2 py-1 bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200 rounded-md text-sm"
+                          >
+                            <span>{{ option.name }}</span>
+                            <UButton
+                              size="2xs"
+                              color="error"
+                              variant="ghost"
+                              icon="i-heroicons-x-mark"
+                              :disabled="loading"
+                              @click="removeOption(groupIndex, optionIndex)"
+                            />
+                          </div>
+                        </div>
+                        <!-- Hidden code field - auto-generated from name -->
+                        <input v-model="group.code" type="hidden" />
+                      </div>
+                    </UFormGroup>
+                  </div>
+                </div>
+              </div>
+            </UCard>
+
+            <!-- Generated Variants -->
+            <UCard>
+              <template #header>
+                <div class="flex items-center justify-between">
+                  <h2 class="text-lg font-semibold">Product Variants</h2>
+                  <div class="flex items-center gap-3">
+                    <div class="text-sm text-gray-500">
+                      {{ form.variants.length }} variant{{
+                        form.variants.length !== 1 ? "s" : ""
+                      }}
+                    </div>
+                    <UButton
+                      size="sm"
+                      variant="outline"
+                      icon="i-heroicons-sparkles"
+                      :disabled="loading || form.optionGroups.length === 0"
+                      @click="generateVariants"
+                    >
+                      Generate Variants
+                    </UButton>
+                  </div>
+                </div>
+              </template>
+
+              <div v-if="form.variants.length === 0" class="text-center py-8">
+                <div class="text-gray-400 mb-4">
+                  <i class="i-heroicons-cube text-4xl" />
+                </div>
+                <h3
+                  class="text-lg font-medium text-gray-900 dark:text-white mb-2"
+                >
+                  No Variants Generated
+                </h3>
+                <p class="text-gray-500">
+                  Variants will be automatically generated when you add option
+                  groups
+                </p>
+              </div>
+
+              <div v-else class="space-y-4">
+                <div
+                  v-for="(variant, variantIndex) in form.variants"
+                  :key="variantIndex"
+                  class="border border-gray-200 dark:border-gray-700 rounded-lg p-4"
+                >
+                  <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div>
+                      <label
+                        class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+                      >
+                        Variant Name
+                      </label>
+                      <div
+                        class="text-sm font-medium text-gray-900 dark:text-white"
+                      >
+                        {{ variant.name }}
+                      </div>
+                    </div>
+
+                    <div>
+                      <label
+                        class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+                      >
+                        SKU
+                      </label>
+                      <UInput
+                        v-model="variant.sku"
+                        size="sm"
+                        :disabled="loading"
+                      />
+                    </div>
+
+                    <div>
+                      <label
+                        class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+                      >
+                        Price
+                      </label>
+                      <UInput
+                        v-model.number="variant.price"
+                        type="number"
+                        size="sm"
+                        step="0.01"
+                        min="0"
+                        :disabled="loading"
+                      />
+                    </div>
+
+                    <div>
+                      <label
+                        class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1"
+                      >
+                        Stock
+                      </label>
+                      <UInput
+                        v-model.number="variant.stockOnHand"
+                        type="number"
+                        size="sm"
+                        min="0"
+                        :disabled="loading"
+                      />
+                    </div>
+                  </div>
+
+                  <div class="mt-3 flex items-center">
+                    <UCheckbox v-model="variant.enabled" :disabled="loading" />
+                    <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">
+                      {{ variant.enabled ? "Active" : "Inactive" }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </UCard>
+          </div>
+        </UForm>
+      </div>
+    </template>
+  </UDashboardPanel>
+</template>
