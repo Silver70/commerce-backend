@@ -323,45 +323,30 @@ export const GET_PRODUCT_VARIANT = gql`
 export const CREATE_PRODUCT = gql`
   mutation CreateProduct($input: CreateProductInput!) {
     createProduct(input: $input) {
-      ... on Product {
+      id
+      name
+      slug
+      description
+      enabled
+      createdAt
+      updatedAt
+      featuredAsset {
         id
         name
-        slug
-        description
-        enabled
-        createdAt
-        updatedAt
-        variants {
-          id
-          name
-          sku
-          price
-          priceWithTax
-          stockLevel
-          enabled
-        }
-        featuredAsset {
-          id
-          name
-          preview
-        }
-        facetValues {
-          id
-          name
-          code
-          facet {
-            id
-            name
-          }
-        }
-        collections {
+        preview
+      }
+      facetValues {
+        id
+        name
+        code
+        facet {
           id
           name
         }
       }
-      ... on ErrorResult {
-        errorCode
-        message
+      collections {
+        id
+        name
       }
     }
   }
@@ -435,22 +420,16 @@ export const DELETE_PRODUCTS = gql`
 export const ADD_OPTION_GROUP_TO_PRODUCT = gql`
   mutation AddOptionGroupToProduct($productId: ID!, $optionGroupId: ID!) {
     addOptionGroupToProduct(productId: $productId, optionGroupId: $optionGroupId) {
-      ... on Product {
+      id
+      optionGroups {
         id
-        optionGroups {
+        name
+        code
+        options {
           id
           name
           code
-          options {
-            id
-            name
-            code
-          }
         }
-      }
-      ... on ErrorResult {
-        errorCode
-        message
       }
     }
   }
@@ -481,6 +460,36 @@ export const REMOVE_OPTION_GROUP_FROM_PRODUCT = gql`
       ... on ErrorResult {
         errorCode
         message
+      }
+    }
+  }
+`
+
+export const CREATE_PRODUCT_OPTION_GROUP = gql`
+  mutation CreateProductOptionGroup($input: CreateProductOptionGroupInput!) {
+    createProductOptionGroup(input: $input) {
+      id
+      name
+      code
+      options {
+        id
+        name
+        code
+      }
+    }
+  }
+`
+
+export const CREATE_PRODUCT_OPTION = gql`
+  mutation CreateProductOption($input: CreateProductOptionInput!) {
+    createProductOption(input: $input) {
+      id
+      name
+      code
+      group {
+        id
+        name
+        code
       }
     }
   }
@@ -529,37 +538,31 @@ export const REMOVE_PRODUCTS_FROM_CHANNEL = gql`
 export const CREATE_PRODUCT_VARIANTS = gql`
   mutation CreateProductVariants($input: [CreateProductVariantInput!]!) {
     createProductVariants(input: $input) {
-      ... on ProductVariant {
+      id
+      name
+      sku
+      price
+      priceWithTax
+      stockLevel
+      enabled
+      product {
         id
         name
-        sku
-        price
-        priceWithTax
-        stockLevel
-        enabled
-        product {
-          id
-          name
-        }
-        options {
+      }
+      options {
+        id
+        name
+        code
+        group {
           id
           name
           code
-          group {
-            id
-            name
-            code
-          }
-        }
-        featuredAsset {
-          id
-          name
-          preview
         }
       }
-      ... on ErrorResult {
-        errorCode
-        message
+      featuredAsset {
+        id
+        name
+        preview
       }
     }
   }

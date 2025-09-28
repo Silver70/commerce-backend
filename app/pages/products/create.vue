@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { z } from "zod";
-import { CREATE_PRODUCT } from "~/graphql/products";
+import {
+  CREATE_PRODUCT,
+  CREATE_PRODUCT_OPTION_GROUP,
+  ADD_OPTION_GROUP_TO_PRODUCT,
+  CREATE_PRODUCT_VARIANTS
+} from "~/graphql/products";
 
 const { $apollo } = useNuxtApp();
 const toast = useToast();
@@ -67,7 +72,6 @@ const schema = z.object({
 type FormData = z.infer<typeof schema>;
 type OptionGroup = z.infer<typeof optionGroupSchema>;
 type Option = z.infer<typeof optionSchema>;
-type Variant = z.infer<typeof variantSchema>;
 
 // Form state
 const loading = ref(false);
@@ -324,7 +328,13 @@ async function onSubmit() {
   try {
     loading.value = true;
 
-    const input = {
+    // Validate that we have at least one variant if option groups exist
+    if (form.value.optionGroups.length > 0 && form.value.variants.length === 0) {
+      throw new Error("Please generate variants before creating the product");
+    }
+
+    // Step 1: Create the basic product
+    const productInput = {
       translations: [
         {
           languageCode: "en",
@@ -335,18 +345,136 @@ async function onSubmit() {
       ],
       enabled: form.value.enabled,
       featuredAssetId: form.value.featuredAssetId,
-      assetIds: form.value.assetIds,
-      facetValueIds: form.value.facetValueIds,
-      customFields: form.value.customFields,
+      assetIds: form.value.assetIds || [],
+      facetValueIds: form.value.facetValueIds || [],
+      customFields: form.value.customFields || {},
     };
 
-    const { data } = await $apollo.mutate({
+    const { data: productData } = await $apollo.mutate({
       mutation: CREATE_PRODUCT,
-      variables: { input },
+      variables: { input: productInput },
     });
 
-    if (data?.createProduct?.errorCode) {
-      throw new Error(data.createProduct.message || "Failed to create product");
+    const product = productData?.createProduct;
+
+    if (!product?.id) {
+      throw new Error("Product was created but no ID was returned");
+    }
+
+    // Step 2: Create option groups and add them to the product (if any)
+    const createdOptionGroups: any[] = [];
+    for (const group of form.value.optionGroups) {
+      // Create the option group with all its options at once
+      const { data: groupData } = await $apollo.mutate({
+        mutation: CREATE_PRODUCT_OPTION_GROUP,
+        variables: {
+          input: {
+            code: group.code,
+            translations: [
+              {
+                languageCode: "en",
+                name: group.name,
+              },
+            ],
+            options: group.options.map(option => ({
+              code: option.code,
+              translations: [
+                {
+                  languageCode: "en",
+                  name: option.name,
+                },
+              ],
+            })),
+          },
+        },
+      });
+
+      const createdGroup = groupData?.createProductOptionGroup;
+      if (!createdGroup) {
+        throw new Error(`Failed to create option group: ${group.name}`);
+      }
+
+      console.log('Created option group:', createdGroup);
+
+      // Add the option group to the product
+      const { data: addGroupData } = await $apollo.mutate({
+        mutation: ADD_OPTION_GROUP_TO_PRODUCT,
+        variables: {
+          productId: product.id,
+          optionGroupId: createdGroup.id,
+        },
+      });
+
+      console.log('Added option group to product:', addGroupData);
+
+      createdOptionGroups.push(createdGroup);
+    }
+
+    // Step 3: Create product variants (if any)
+    if (form.value.variants.length > 0) {
+      const variantInputs = form.value.variants.map(variant => {
+        // Map the variant's option IDs to the actual created option IDs
+        const optionIds = variant.options.map(variantOption => {
+          // Find the original group and option from our form data
+          const originalGroup = form.value.optionGroups.find(og => og.id === variantOption.optionGroupId);
+          const originalOption = originalGroup?.options.find(o => o.id === variantOption.optionId);
+
+          if (!originalOption || !originalGroup) {
+            console.warn('Could not find original option:', { variantOption, originalGroup, originalOption });
+            return null;
+          }
+
+          // Find the corresponding created group by matching the code
+          const createdGroup = createdOptionGroups.find((g: any) => g.code === originalGroup.code);
+
+          if (!createdGroup?.options) {
+            console.warn('Could not find created group or its options:', { originalGroup, createdGroup });
+            return null;
+          }
+
+          // Find the created option by matching the code
+          const createdOption = createdGroup.options.find((o: any) => o.code === originalOption.code);
+
+          if (!createdOption) {
+            console.warn('Could not find created option:', { originalOption, createdGroup });
+            return null;
+          }
+
+          return createdOption.id;
+        }).filter(Boolean);
+
+        console.log('Variant options mapping:', {
+          variantName: variant.name,
+          originalOptions: variant.options,
+          mappedOptionIds: optionIds,
+          createdOptionGroups: createdOptionGroups.map(g => ({ id: g.id, code: g.code, name: g.name }))
+        });
+
+        // Validate that we have exactly one option from each group
+        if (optionIds.length !== createdOptionGroups.length) {
+          throw new Error(`Variant "${variant.name}" should have ${createdOptionGroups.length} options, but only has ${optionIds.length}`);
+        }
+
+        return {
+          productId: product.id,
+          translations: [
+            {
+              languageCode: "en",
+              name: variant.name,
+            },
+          ],
+          sku: variant.sku,
+          price: Math.round(variant.price * 100), // Convert to cents
+          stockOnHand: variant.stockOnHand,
+          enabled: variant.enabled,
+          optionIds,
+        };
+      });
+
+      await $apollo.mutate({
+        mutation: CREATE_PRODUCT_VARIANTS,
+        variables: { input: variantInputs },
+      });
     }
 
     toast.add({
@@ -356,16 +484,23 @@ async function onSubmit() {
     });
 
     // Navigate to the created product
-    const productId = data?.createProduct?.id;
-    if (productId) {
-      await router.push(`/products/${productId}`);
-    } else {
-      await router.push("/products");
-    }
+    await router.push(`/products/${product.id}`);
   } catch (error: any) {
+    console.error("Product creation error:", error);
+
+    let errorMessage = "Failed to create product";
+
+    if (error.graphQLErrors?.length > 0) {
+      errorMessage = error.graphQLErrors[0].message;
+    } else if (error.networkError) {
+      errorMessage = "Network error - please check your connection";
+    } else if (error.message) {
+      errorMessage = error.message;
+    }
+
     toast.add({
       title: "Error",
-      description: error.message || "Failed to create product",
+      description: errorMessage,
       color: "error",
     });
   } finally {
@@ -828,14 +963,20 @@ function onCancel() {
                       >
                         SEO Preview
                       </h3>
-                      <div class="mt-2 text-sm text-blue-700 dark:text-blue-300">
+                      <div
+                        class="mt-2 text-sm text-blue-700 dark:text-blue-300"
+                      >
                         <div class="font-medium">
                           {{ form.name || "Product Name" }}
                         </div>
                         <div class="text-green-600 dark:text-green-400 text-xs">
-                          yourstore.com/products/{{ form.slug || "product-slug" }}
+                          yourstore.com/products/{{
+                            form.slug || "product-slug"
+                          }}
                         </div>
-                        <div class="text-gray-600 dark:text-gray-400 text-xs mt-1">
+                        <div
+                          class="text-gray-600 dark:text-gray-400 text-xs mt-1"
+                        >
                           {{ getDescriptionPreview() }}
                         </div>
                       </div>
