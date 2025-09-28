@@ -1,5 +1,10 @@
 <script setup lang="ts">
 import { z } from "zod";
+import { CREATE_PRODUCT } from "~/graphql/products";
+
+const { $apollo } = useNuxtApp();
+const toast = useToast();
+const router = useRouter();
 
 // Form validation schemas
 const optionSchema = z.object({
@@ -41,8 +46,22 @@ const schema = z.object({
     ),
   description: z.string().optional(),
   enabled: z.boolean(),
+  featuredAssetId: z.string().optional(),
+  assetIds: z.array(z.string()).optional(),
+  facetValueIds: z.array(z.string()).optional(),
   optionGroups: z.array(optionGroupSchema),
   variants: z.array(variantSchema),
+  translations: z
+    .array(
+      z.object({
+        languageCode: z.string(),
+        name: z.string(),
+        slug: z.string(),
+        description: z.string().optional(),
+      })
+    )
+    .optional(),
+  customFields: z.record(z.string(), z.any()).optional(),
 });
 
 type FormData = z.infer<typeof schema>;
@@ -57,8 +76,13 @@ const form = ref<FormData>({
   slug: "",
   description: "",
   enabled: true,
+  featuredAssetId: undefined,
+  assetIds: [],
+  facetValueIds: [],
   optionGroups: [],
   variants: [],
+  translations: [],
+  customFields: {},
 });
 
 // Generate unique IDs
@@ -283,14 +307,75 @@ function generateVariantSku(
     : baseSlug;
 }
 
-// Form submission
-async function onSubmit() {
-  console.log("Form submitted", form.value);
+// Helper function to get description preview for SEO
+function getDescriptionPreview(): string {
+  const description = form.value.description;
+  if (!description) {
+    return "Product description will appear here...";
+  }
+
+  const truncated = description.substring(0, 120);
+  const ellipsis = description.length > 120 ? "..." : "";
+  return truncated + ellipsis;
 }
 
-// Cancel
+// Form submission
+async function onSubmit() {
+  try {
+    loading.value = true;
+
+    const input = {
+      translations: [
+        {
+          languageCode: "en",
+          name: form.value.name,
+          slug: form.value.slug,
+          description: form.value.description || "",
+        },
+      ],
+      enabled: form.value.enabled,
+      featuredAssetId: form.value.featuredAssetId,
+      assetIds: form.value.assetIds,
+      facetValueIds: form.value.facetValueIds,
+      customFields: form.value.customFields,
+    };
+
+    const { data } = await $apollo.mutate({
+      mutation: CREATE_PRODUCT,
+      variables: { input },
+    });
+
+    if (data?.createProduct?.errorCode) {
+      throw new Error(data.createProduct.message || "Failed to create product");
+    }
+
+    toast.add({
+      title: "Success",
+      description: "Product created successfully",
+      color: "success",
+    });
+
+    // Navigate to the created product
+    const productId = data?.createProduct?.id;
+    if (productId) {
+      await router.push(`/products/${productId}`);
+    } else {
+      await router.push("/products");
+    }
+  } catch (error: any) {
+    toast.add({
+      title: "Error",
+      description: error.message || "Failed to create product",
+      color: "error",
+    });
+  } finally {
+    loading.value = false;
+  }
+}
+
+// Cancel and go back
 function onCancel() {
-  navigateTo("/products");
+  router.push("/products");
 }
 </script>
 
@@ -330,10 +415,11 @@ function onCancel() {
           id="product-form"
           :schema="schema"
           :state="form"
-          class="max-w-2xl"
+          class="w-full flex gap-6"
           @submit="onSubmit"
         >
-          <div class="space-y-6">
+          <!-- Main Content Area - Left Side (2/3) -->
+          <div class="w-2/3 space-y-6">
             <!-- Basic Information -->
             <UCard>
               <template #header>
@@ -341,33 +427,34 @@ function onCancel() {
               </template>
 
               <div class="space-y-4">
-                <UFormGroup label="Product Name" name="name" required>
-                  <UInput
-                    v-model="form.name"
-                    placeholder="Enter product name"
-                    :disabled="loading"
-                    @blur="handleNameBlur"
-                  />
-                </UFormGroup>
-
-                <UFormGroup label="Slug" name="slug" required>
-                  <div class="flex gap-2">
+                <div class="flex gap-2 w-full">
+                  <UFormGroup label="Product Name" name="name" required>
                     <UInput
-                      v-model="form.slug"
-                      placeholder="product-slug"
+                      v-model="form.name"
+                      placeholder="Enter product name"
                       :disabled="loading"
-                      class="flex-1"
+                      @blur="handleNameBlur"
                     />
-                    <UButton
-                      size="sm"
-                      variant="outline"
-                      :disabled="loading || !form.name"
-                      @click="generateSlug"
-                    >
-                      Generate
-                    </UButton>
-                  </div>
-                </UFormGroup>
+                  </UFormGroup>
+
+                  <UFormGroup label="Slug" name="slug" required>
+                    <div class="flex gap-2">
+                      <UInput
+                        v-model="form.slug"
+                        placeholder="product-slug"
+                        :disabled="loading"
+                      />
+                      <UButton
+                        size="sm"
+                        variant="outline"
+                        :disabled="loading || !form.name"
+                        @click="generateSlug"
+                      >
+                        Generate
+                      </UButton>
+                    </div>
+                  </UFormGroup>
+                </div>
 
                 <UFormGroup label="Description" name="description">
                   <UTextarea
@@ -375,15 +462,75 @@ function onCancel() {
                     placeholder="Product description..."
                     :rows="3"
                     :disabled="loading"
+                    class="w-full"
                   />
                 </UFormGroup>
 
-                <UFormGroup label="Status" name="enabled">
+                <UFormGroup label="Status" name="enabled" class="flex pt-3">
                   <UCheckbox v-model="form.enabled" :disabled="loading" />
                   <span class="ml-2 text-sm">
                     {{ form.enabled ? "Active" : "Inactive" }}
                   </span>
                 </UFormGroup>
+              </div>
+            </UCard>
+
+            <!-- Product Images -->
+            <UCard>
+              <template #header>
+                <h2 class="text-lg font-semibold">Product Images</h2>
+              </template>
+
+              <div class="space-y-6">
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <!-- Featured Image Upload -->
+                  <UFormGroup label="Featured Image" name="featuredAssetId">
+                    <div
+                      class="border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6 text-center"
+                    >
+                      <div class="space-y-2">
+                        <i
+                          class="i-heroicons-photo text-4xl text-gray-400 mx-auto"
+                        />
+                        <div class="text-sm text-gray-600 dark:text-gray-400">
+                          <p>Drag and drop an image here, or click to browse</p>
+                          <p class="text-xs">PNG, JPG, GIF up to 10MB</p>
+                        </div>
+                        <UButton
+                          variant="outline"
+                          size="sm"
+                          :disabled="loading"
+                        >
+                          Choose File
+                        </UButton>
+                      </div>
+                    </div>
+                  </UFormGroup>
+
+                  <!-- Additional Images -->
+                  <UFormGroup label="Additional Images" name="assetIds">
+                    <div
+                      class="border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg p-6 text-center"
+                    >
+                      <div class="space-y-2">
+                        <i
+                          class="i-heroicons-photo text-4xl text-gray-400 mx-auto"
+                        />
+                        <div class="text-sm text-gray-600 dark:text-gray-400">
+                          <p>Add more product images</p>
+                          <p class="text-xs">You can upload multiple images</p>
+                        </div>
+                        <UButton
+                          variant="outline"
+                          size="sm"
+                          :disabled="loading"
+                        >
+                          Add Images
+                        </UButton>
+                      </div>
+                    </div>
+                  </UFormGroup>
+                </div>
               </div>
             </UCard>
 
@@ -618,6 +765,151 @@ function onCancel() {
                     <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">
                       {{ variant.enabled ? "Active" : "Inactive" }}
                     </span>
+                  </div>
+                </div>
+              </div>
+            </UCard>
+          </div>
+
+          <!-- Right Sidebar - Secondary Information (1/3) -->
+          <div class="w-1/3 space-y-6">
+            <!-- Organization -->
+            <UCard>
+              <template #header>
+                <h2 class="text-lg font-semibold">Organization</h2>
+              </template>
+
+              <div class="space-y-4">
+                <UFormGroup label="Categories & Tags" name="facetValueIds">
+                  <USelectMenu
+                    v-model="form.facetValueIds"
+                    :options="[]"
+                    multiple
+                    placeholder="Select categories"
+                    :disabled="loading"
+                  >
+                    <template #empty>
+                      <div class="text-center py-4">
+                        <p class="text-sm text-gray-500">
+                          No categories available
+                        </p>
+                        <p class="text-xs text-gray-400 mt-1">
+                          Categories will be loaded from your Vendure instance
+                        </p>
+                      </div>
+                    </template>
+                  </USelectMenu>
+                  <template #help>
+                    <span class="text-sm text-gray-500">
+                      Choose categories and tags to help organize your product
+                    </span>
+                  </template>
+                </UFormGroup>
+              </div>
+            </UCard>
+
+            <!-- SEO Preview -->
+            <UCard>
+              <template #header>
+                <h2 class="text-lg font-semibold">SEO Preview</h2>
+              </template>
+
+              <div class="space-y-4">
+                <div
+                  class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4"
+                >
+                  <div class="flex items-start">
+                    <i
+                      class="i-heroicons-information-circle text-blue-500 mt-0.5 mr-3"
+                    />
+                    <div class="flex-1">
+                      <h3
+                        class="text-sm font-medium text-blue-800 dark:text-blue-200"
+                      >
+                        SEO Preview
+                      </h3>
+                      <div class="mt-2 text-sm text-blue-700 dark:text-blue-300">
+                        <div class="font-medium">
+                          {{ form.name || "Product Name" }}
+                        </div>
+                        <div class="text-green-600 dark:text-green-400 text-xs">
+                          yourstore.com/products/{{ form.slug || "product-slug" }}
+                        </div>
+                        <div class="text-gray-600 dark:text-gray-400 text-xs mt-1">
+                          {{ getDescriptionPreview() }}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="space-y-4">
+                  <div>
+                    <label
+                      class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
+                    >
+                      Meta Title
+                    </label>
+                    <UInput
+                      :model-value="form.name"
+                      placeholder="SEO title"
+                      :disabled="true"
+                    />
+                    <p class="text-xs text-gray-500 mt-1">
+                      Uses product name by default
+                    </p>
+                  </div>
+
+                  <div>
+                    <label
+                      class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
+                    >
+                      URL Slug
+                    </label>
+                    <UInput :model-value="form.slug" :disabled="true" />
+                    <p class="text-xs text-gray-500 mt-1">
+                      Auto-generated from product name
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </UCard>
+
+            <!-- Product Summary -->
+            <UCard>
+              <template #header>
+                <h2 class="text-lg font-semibold">Summary</h2>
+              </template>
+
+              <div class="space-y-4">
+                <div class="grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <span class="text-gray-500">Status:</span>
+                    <div class="font-medium">
+                      <UBadge
+                        :color="form.enabled ? 'success' : 'neutral'"
+                        :label="form.enabled ? 'Active' : 'Inactive'"
+                        size="xs"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <span class="text-gray-500">Variants:</span>
+                    <div class="font-medium">
+                      {{ form.variants.length }}
+                    </div>
+                  </div>
+                  <div>
+                    <span class="text-gray-500">Option Groups:</span>
+                    <div class="font-medium">
+                      {{ form.optionGroups.length }}
+                    </div>
+                  </div>
+                  <div>
+                    <span class="text-gray-500">Categories:</span>
+                    <div class="font-medium">
+                      {{ form.facetValueIds?.length || 0 }}
+                    </div>
                   </div>
                 </div>
               </div>
