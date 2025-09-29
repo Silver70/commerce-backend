@@ -394,7 +394,7 @@ async function onSubmit() {
         throw new Error(`Failed to create option group: ${group.name}`);
       }
 
-      console.log('Created option group:', createdGroup);
+
 
       // Add the option group to the product
       const { data: addGroupData } = await $apollo.mutate({
@@ -405,7 +405,7 @@ async function onSubmit() {
         },
       });
 
-      console.log('Added option group to product:', addGroupData);
+     
 
       createdOptionGroups.push(createdGroup);
     }

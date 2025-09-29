@@ -2,7 +2,7 @@
 import type { TableColumn } from "@nuxt/ui";
 import type { Row } from "@tanstack/table-core";
 import type { Product } from "~/types";
-import { GET_PRODUCTS } from "~/graphql/products";
+import { GET_PRODUCTS, DELETE_PRODUCT } from "~/graphql/products";
 
 const { $apollo } = useNuxtApp();
 
@@ -21,6 +21,7 @@ const data = ref<Product[]>([]);
 const totalItems = ref(0);
 const loading = ref(true);
 const error = ref<string | null>(null);
+const table = ref();
 
 async function fetchProducts() {
   try {
@@ -68,6 +69,43 @@ onMounted(() => {
 // Watch pagination changes
 watch(pagination, fetchProducts, { deep: true });
 
+async function deleteProduct(productId: string, productName: string) {
+  try {
+    if (!$apollo) {
+      throw new Error("Apollo client not available");
+    }
+
+    const { data: deleteData } = await $apollo.mutate({
+      mutation: DELETE_PRODUCT,
+      variables: {
+        id: productId,
+      },
+    });
+
+    if (deleteData?.deleteProduct?.result === "DELETED") {
+      toast.add({
+        title: "Product deleted",
+        description: `${productName} has been deleted successfully.`,
+        color: "success",
+      });
+
+      // Refresh the products list
+      await fetchProducts();
+    } else {
+      throw new Error(
+        deleteData?.deleteProduct?.message || "Failed to delete product"
+      );
+    }
+  } catch (err: any) {
+    console.error("Error deleting product:", err);
+    toast.add({
+      title: "Error",
+      description: err.message || "Failed to delete product",
+      color: "error",
+    });
+  }
+}
+
 function getRowItems(row: Row<Product>) {
   return [
     {
@@ -107,10 +145,7 @@ function getRowItems(row: Row<Product>) {
       icon: "i-lucide-trash",
       color: "error",
       onSelect() {
-        toast.add({
-          title: "Product deleted",
-          description: "The product has been deleted.",
-        });
+        deleteProduct(row.original.id, row.original.name);
       },
     },
   ];
